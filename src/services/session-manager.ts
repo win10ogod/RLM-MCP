@@ -387,7 +387,7 @@ export class SessionManager {
       Math,
 
       // Type checking
-      typeof: (val: unknown): string => typeof val,
+      typeOf: (val: unknown): string => typeof val,
       isArray: Array.isArray,
       isString: (val: unknown): boolean => typeof val === 'string',
       isNumber: (val: unknown): boolean => typeof val === 'number',
