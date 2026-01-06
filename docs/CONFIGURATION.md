@@ -26,6 +26,18 @@ None.
 | `RLM_HTTPS_KEY_PATH` | Path to TLS private key (PEM) | - |
 | `RLM_HTTPS_CERT_PATH` | Path to TLS certificate (PEM) | - |
 | `RLM_HTTPS_KEY_PASSPHRASE` | Passphrase for TLS private key | - |
+| `RLM_OAUTH_ENABLED` | Enable OAuth2 for HTTP `/mcp` | `false` |
+| `RLM_OAUTH_ISSUER` | Override OAuth issuer URL | - |
+| `RLM_OAUTH_AUDIENCE` | OAuth audience | `rlm-mcp` |
+| `RLM_OAUTH_CLIENT_ID` | OAuth client ID | `rlm-client` |
+| `RLM_OAUTH_CLIENT_SECRET` | OAuth client secret | `rlm-secret` |
+| `RLM_OAUTH_SCOPES` | Space-separated scopes | `mcp` |
+| `RLM_OAUTH_TOKEN_TTL_SECONDS` | Access token TTL (seconds) | `3600` |
+| `RLM_OAUTH_ALLOW_INSECURE_HTTP` | Allow OAuth over HTTP | `false` |
+| `RLM_OAUTH_JWT_ALG` | JWT algorithm (`RS256` or `HS256`) | `RS256` |
+| `RLM_OAUTH_JWT_SECRET` | HMAC secret when using `HS256` | - |
+| `RLM_OAUTH_PRIVATE_KEY_PATH` | PEM private key for `RS256` | - |
+| `RLM_OAUTH_PUBLIC_KEY_PATH` | PEM public key for `RS256` | - |
 
 Storage is enabled by default in `.rlm_storage` under the server working directory.
 Set `RLM_STORAGE_DIR` to change the location, or set it to an empty string to disable persistence.
@@ -61,8 +73,18 @@ Best for quick local testing without extra flags:
 node dist/index.js --serve --port=3000
 ```
 
-Uses HTTPS when `RLM_HTTPS_KEY_PATH` and `RLM_HTTPS_CERT_PATH` are configured
-(or `RLM_HTTPS_ENABLED=true`), otherwise falls back to HTTP.
+Uses HTTPS when `RLM_HTTPS_KEY_PATH` and `RLM_HTTPS_CERT_PATH` are configured,
+otherwise falls back to HTTP.
+
+### All Mode (Stdio + HTTP/HTTPS)
+
+Run both transports together:
+
+```bash
+node dist/index.js --all --port=3000
+```
+
+If the port is in use, the server will try the next available port automatically.
 
 ### HTTPS Mode
 
@@ -85,6 +107,15 @@ export RLM_HTTPS_KEY_PATH="/path/to/key.pem"
 export RLM_HTTPS_CERT_PATH="/path/to/cert.pem"
 node dist/index.js --https --port=3443
 ```
+
+## OAuth2 (HTTP)
+
+When `RLM_OAUTH_ENABLED=true`, the server protects `POST /mcp` and exposes:
+- `/.well-known/oauth-authorization-server`
+- `/oauth/token`
+- `/oauth/jwks` (for RS256)
+
+`/oauth/token` supports the client credentials grant with `client_secret_basic` or `client_secret_post`.
 
 ## Resource Limits
 

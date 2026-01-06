@@ -383,8 +383,21 @@ For quick local testing without extra flags:
 ```bash
 node dist/index.js --serve --port=3000
 ```
-Uses HTTPS when `RLM_HTTPS_KEY_PATH` and `RLM_HTTPS_CERT_PATH` are configured (or `RLM_HTTPS_ENABLED=true`),
+Uses HTTPS when `RLM_HTTPS_KEY_PATH` and `RLM_HTTPS_CERT_PATH` are available,
 otherwise falls back to HTTP.
+If you place dev certs at `certs/localhost.key` and `certs/localhost.crt`, they are auto-detected.
+
+### All (Stdio + HTTP/HTTPS)
+Run both transports together:
+```bash
+node dist/index.js --all --port=3000
+```
+Or:
+```bash
+npm run all
+```
+
+If the chosen port is in use, `--all` will try the next available port automatically.
 
 ### HTTP
 For remote access or testing:
@@ -396,6 +409,29 @@ Endpoints:
 - `POST /mcp` - MCP protocol
 - `GET /health` - Health check
 - `GET /info` - Server info
+
+## HTTP Authentication (OAuth2)
+
+Set `RLM_OAUTH_ENABLED=true` to protect the HTTP `/mcp` endpoint with OAuth2
+client credentials. The server exposes:
+- `/.well-known/oauth-authorization-server`
+- `/oauth/token`
+- `/oauth/jwks` (for RS256)
+
+Example token request:
+```bash
+curl -X POST http://localhost:3000/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=rlm-client&client_secret=rlm-secret&scope=mcp"
+```
+
+Use the returned token:
+```bash
+curl -X POST http://localhost:3000/mcp \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
 
 ## Why This Design?
 

@@ -37,7 +37,9 @@
  */
 
 import fs from 'node:fs';
+import http from 'node:http';
 import https from 'node:https';
+import type { AddressInfo } from 'node:net';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -49,6 +51,7 @@ import { sessionManager } from './services/session-manager.js';
 import { chunkCache } from './services/chunk-cache.js';
 import { chunkIndex } from './services/chunk-index.js';
 import { queryCache } from './services/query-cache.js';
+import { initializeOAuth, type OAuthState } from './services/oauth.js';
 import { getTutorialResourceSummaries } from './services/tutorials.js';
 import { logger, LogLevel } from './utils/logger.js';
 import { metrics } from './utils/metrics.js';
@@ -95,11 +98,108 @@ function getContentLength(req: Request): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function resolveHttpsOptions(requireHttps: boolean): {
+function parseClientCredentials(req: Request): { clientId?: string; clientSecret?: string } {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Basic ')) {
+    const encoded = authHeader.slice('Basic '.length);
+    try {
+      const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+      const separatorIndex = decoded.indexOf(':');
+      if (separatorIndex > -1) {
+        const clientId = decoded.slice(0, separatorIndex);
+        const clientSecret = decoded.slice(separatorIndex + 1);
+        if (clientId && clientSecret) {
+          return { clientId, clientSecret };
+        }
+      }
+    } catch {
+      return {};
+    }
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const clientId = typeof body.client_id === 'string' ? body.client_id : undefined;
+  const clientSecret = typeof body.client_secret === 'string' ? body.client_secret : undefined;
+  return { clientId, clientSecret };
+}
+
+function normalizeScope(requested: string | undefined, allowed: string[]): { scope: string; error?: string } {
+  const defaultScope = allowed.join(' ');
+  if (!requested) {
+    return { scope: defaultScope };
+  }
+
+  const requestedScopes = requested.split(/\s+/).filter(Boolean);
+  const allowedSet = new Set(allowed);
+  const invalid = requestedScopes.filter(scope => !allowedSet.has(scope));
+
+  if (invalid.length > 0) {
+    return { scope: '', error: 'invalid_scope' };
+  }
+
+  return { scope: requestedScopes.join(' ') };
+}
+
+function sendOAuthError(
+  res: Response,
+  oauth: OAuthState,
+  status: number,
+  error: string,
+  description: string
+): void {
+  res.set('WWW-Authenticate', `Bearer realm="${SERVER_NAME}", error="${error}", error_description="${description}"`);
+  res.status(status).json({
+    error,
+    error_description: description,
+    issuer: oauth.issuer,
+    token_endpoint: oauth.metadata.token_endpoint
+  });
+}
+
+function createAuthMiddleware(getOAuth: () => OAuthState) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const oauth = getOAuth();
+    if (!oauth.enabled) {
+      next();
+      return;
+    }
+
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      sendOAuthError(res, oauth, 401, 'invalid_request', 'Missing bearer token');
+      return;
+    }
+
+    const token = authHeader.slice('Bearer '.length).trim();
+    if (!token) {
+      sendOAuthError(res, oauth, 401, 'invalid_request', 'Missing bearer token');
+      return;
+    }
+
+    try {
+      const payload = await oauth.verifyToken(token);
+      const scopeValue = typeof payload.scope === 'string' ? payload.scope : '';
+      const tokenScopes = scopeValue.split(/\s+/).filter(Boolean);
+      const allowedScopes = new Set(oauth.scopes);
+      const hasScope = tokenScopes.some(scope => allowedScopes.has(scope));
+
+      if (!hasScope) {
+        sendOAuthError(res, oauth, 403, 'insufficient_scope', 'Token scope does not allow access');
+        return;
+      }
+
+      next();
+    } catch {
+      sendOAuthError(res, oauth, 401, 'invalid_token', 'Token verification failed');
+    }
+  };
+}
+
+function resolveHttpsOptions(requireHttps: boolean, preferHttps: boolean): {
   useHttps: boolean;
   options?: https.ServerOptions;
 } {
-  const enabled = requireHttps || HTTP_CONFIG.HTTPS_ENABLED;
+  const enabled = requireHttps || HTTP_CONFIG.HTTPS_ENABLED || preferHttps;
   if (!enabled) {
     return { useHttps: false };
   }
@@ -115,6 +215,18 @@ function resolveHttpsOptions(requireHttps: boolean): {
     logger.warn(message, {
       keyPathConfigured: Boolean(keyPath),
       certPathConfigured: Boolean(certPath)
+    });
+    return { useHttps: false };
+  }
+
+  if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+    const message = 'HTTPS key/cert files not found';
+    if (requireHttps) {
+      throw new Error(message);
+    }
+    logger.warn(message, {
+      keyPath,
+      certPath
     });
     return { useHttps: false };
   }
@@ -188,12 +300,26 @@ async function startStdioServer(): Promise<void> {
  */
 async function startHttpServer(
   port: number = HTTP_CONFIG.DEFAULT_PORT,
-  options: { requireHttps?: boolean } = {}
+  options: { requireHttps?: boolean; preferHttps?: boolean; autoPort?: boolean } = {}
 ): Promise<void> {
   const app = express();
   const limiter = createConcurrencyLimiter(HTTP_CONFIG.MAX_CONCURRENT_REQUESTS);
-  const httpsConfig = resolveHttpsOptions(Boolean(options.requireHttps));
+  const httpsConfig = resolveHttpsOptions(Boolean(options.requireHttps), Boolean(options.preferHttps));
   const protocol = httpsConfig.useHttps ? 'https' : 'http';
+  let oauthState: OAuthState = {
+    enabled: false,
+    issuer: '',
+    audience: '',
+    scopes: [],
+    allowInsecureHttp: false,
+    clientId: '',
+    clientSecret: '',
+    metadata: {},
+    issueToken: async () => ({ accessToken: '', expiresIn: 0, scope: '' }),
+    verifyToken: async () => ({})
+  };
+
+  const getOAuth = () => oauthState;
 
   app.use((req: Request, res: Response, next: NextFunction) => {
     const contentLength = getContentLength(req);
@@ -211,9 +337,66 @@ async function startHttpServer(
     next();
   });
   app.use(express.json({ limit: HTTP_CONFIG.MAX_BODY_SIZE }));
+  app.use(express.urlencoded({ extended: false }));
+
+  app.get('/.well-known/oauth-authorization-server', (_req, res) => {
+    const oauth = getOAuth();
+    if (!oauth.enabled) {
+      res.status(404).json({ error: 'oauth_disabled' });
+      return;
+    }
+    res.json(oauth.metadata);
+  });
+
+  app.get('/oauth/jwks', (_req, res) => {
+    const oauth = getOAuth();
+    if (!oauth.enabled || !oauth.jwks) {
+      res.status(404).json({ error: 'oauth_disabled' });
+      return;
+    }
+    res.json(oauth.jwks);
+  });
+
+  app.post('/oauth/token', async (req, res) => {
+    const oauth = getOAuth();
+    if (!oauth.enabled) {
+      res.status(404).json({ error: 'oauth_disabled' });
+      return;
+    }
+
+    const grantType = typeof req.body.grant_type === 'string' ? req.body.grant_type : '';
+    if (grantType !== 'client_credentials') {
+      res.status(400).json({ error: 'unsupported_grant_type' });
+      return;
+    }
+
+    const { clientId, clientSecret } = parseClientCredentials(req);
+    if (!clientId || !clientSecret || clientId !== oauth.clientId || clientSecret !== oauth.clientSecret) {
+      res.set('WWW-Authenticate', `Basic realm="${SERVER_NAME}"`);
+      res.status(401).json({ error: 'invalid_client' });
+      return;
+    }
+
+    const requestedScope = typeof req.body.scope === 'string' ? req.body.scope : undefined;
+    const scopeResult = normalizeScope(requestedScope, oauth.scopes);
+    if (scopeResult.error) {
+      res.status(400).json({ error: 'invalid_scope' });
+      return;
+    }
+
+    const token = await oauth.issueToken(scopeResult.scope);
+    res.set('Cache-Control', 'no-store');
+    res.set('Pragma', 'no-cache');
+    res.json({
+      access_token: token.accessToken,
+      token_type: 'Bearer',
+      expires_in: token.expiresIn,
+      scope: token.scope
+    });
+  });
 
   // Create a new server instance for each request (stateless)
-  app.post('/mcp', async (req, res) => {
+  app.post('/mcp', createAuthMiddleware(getOAuth), async (req, res) => {
     if (!limiter.tryAcquire(res)) {
       logger.warn('HTTP request rejected due to concurrency limit', {
         active: limiter.getActive(),
@@ -266,6 +449,7 @@ async function startHttpServer(
       version: SERVER_VERSION,
       description: 'RLM Infrastructure Server - Enables any LLM to process arbitrarily long contexts through recursive decomposition',
       design: 'No external LLM API required - your client LLM performs the reasoning',
+      auth: getOAuth().enabled ? { type: 'oauth2', issuer: getOAuth().issuer } : { type: 'none' },
       features: [
         'Token-based chunking (tiktoken)',
         'BM25 chunk ranking',
@@ -341,26 +525,67 @@ async function startHttpServer(
     next(err as Error);
   });
 
-  const logServer = () => {
+  const logServer = (boundPort: number) => {
     logger.serverStarted(protocol, { 
-      port, 
+      port: boundPort, 
       version: SERVER_VERSION,
       endpoints: {
-        mcp: `POST ${protocol}://localhost:${port}/mcp`,
-        health: `GET ${protocol}://localhost:${port}/health`,
-        info: `GET ${protocol}://localhost:${port}/info`,
-        metrics: `GET ${protocol}://localhost:${port}/metrics`
+        mcp: `POST ${protocol}://localhost:${boundPort}/mcp`,
+        health: `GET ${protocol}://localhost:${boundPort}/health`,
+        info: `GET ${protocol}://localhost:${boundPort}/info`,
+        metrics: `GET ${protocol}://localhost:${boundPort}/metrics`
       }
     });
   };
 
-  if (httpsConfig.useHttps && httpsConfig.options) {
-    const server = https.createServer(httpsConfig.options, app);
-    server.listen(port, logServer);
-    return;
-  }
+  const createHttpServer = () => {
+    return httpsConfig.useHttps && httpsConfig.options
+      ? https.createServer(httpsConfig.options, app)
+      : http.createServer(app);
+  };
 
-  app.listen(port, logServer);
+  const maxAttempts = options.autoPort ? 20 : 1;
+  let attemptPort = port;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const baseUrl = process.env.RLM_OAUTH_ISSUER || `${protocol}://localhost:${attemptPort}`;
+    oauthState = await initializeOAuth({ baseUrl, protocol });
+
+    if (oauthState.enabled && protocol !== 'https' && !oauthState.allowInsecureHttp) {
+      logger.error('OAuth requires HTTPS. Configure TLS or set RLM_OAUTH_ALLOW_INSECURE_HTTP=true for local testing.');
+      process.exit(1);
+    }
+
+    const server = createHttpServer();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: unknown) => {
+          server.removeListener('listening', onListening);
+          reject(error);
+        };
+        const onListening = () => {
+          server.removeListener('error', onError);
+          resolve();
+        };
+        server.once('error', onError);
+        server.once('listening', onListening);
+        server.listen(attemptPort);
+      });
+
+      const address = server.address() as AddressInfo | null;
+      const boundPort = address && typeof address === 'object' ? address.port : attemptPort;
+      logServer(boundPort);
+      return;
+    } catch (error: unknown) {
+      const code = error && typeof error === 'object' && 'code' in error ? (error as { code?: string }).code : undefined;
+      if (code === 'EADDRINUSE' && attempt + 1 < maxAttempts) {
+        logger.warn('Port in use, trying next port', { port: attemptPort });
+        attemptPort += 1;
+        continue;
+      }
+      throw error;
+    }
+  }
 }
 
 /**
@@ -378,6 +603,7 @@ OPTIONS:
   --stdio          Run with stdio transport (default)
   --http           Run with HTTP transport
   --serve          Run HTTP server (HTTPS if configured, otherwise HTTP)
+  --all            Run stdio and HTTP/HTTPS together
   --https          Run with HTTPS transport (requires TLS key/cert)
   --port=PORT      HTTP port (default: ${HTTP_CONFIG.DEFAULT_PORT})
   --debug          Enable debug logging
@@ -387,6 +613,7 @@ EXAMPLES:
   node dist/index.js                    # Start with stdio
   node dist/index.js --http             # Start HTTP server on port ${HTTP_CONFIG.DEFAULT_PORT}
   node dist/index.js --serve            # Start HTTP/HTTPS automatically
+  node dist/index.js --all              # Start stdio + HTTP/HTTPS
   node dist/index.js --https            # Start HTTPS server on port ${HTTP_CONFIG.DEFAULT_PORT}
   node dist/index.js --http --port=8080 # Start HTTP server on port 8080
   node dist/index.js --debug            # Start with debug logging
@@ -439,13 +666,20 @@ async function main(): Promise<void> {
   }
 
   const serveMode = args.includes('--serve');
-  const httpMode = args.includes('--http') || args.includes('--https') || serveMode;
+  const allMode = args.includes('--all');
+  const httpMode = args.includes('--http') || args.includes('--https') || serveMode || allMode;
   const requireHttps = args.includes('--https');
   const portArg = args.find(a => a.startsWith('--port='));
   const port = portArg ? parseInt(portArg.split('=')[1], 10) : HTTP_CONFIG.DEFAULT_PORT;
 
+  const modeLabel = allMode
+    ? 'all'
+    : httpMode
+      ? (requireHttps || HTTP_CONFIG.HTTPS_ENABLED ? 'https' : 'http')
+      : 'stdio';
+
   logger.info(`${SERVER_NAME} v${SERVER_VERSION} starting`, {
-    mode: httpMode ? (requireHttps || HTTP_CONFIG.HTTPS_ENABLED ? 'https' : 'http') : 'stdio',
+    mode: modeLabel,
     nodeVersion: process.version,
     platform: process.platform
   });
@@ -476,11 +710,19 @@ async function main(): Promise<void> {
     });
   });
 
-  if (httpMode) {
+  if (allMode) {
     if (requireHttps) {
       assertHttpsConfig();
     }
-    await startHttpServer(port, { requireHttps });
+    await Promise.all([
+      startStdioServer(),
+      startHttpServer(port, { requireHttps, preferHttps: true, autoPort: true })
+    ]);
+  } else if (httpMode) {
+    if (requireHttps) {
+      assertHttpsConfig();
+    }
+    await startHttpServer(port, { requireHttps, preferHttps: serveMode, autoPort: serveMode });
   } else {
     await startStdioServer();
   }

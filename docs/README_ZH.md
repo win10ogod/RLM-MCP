@@ -32,8 +32,21 @@ npm run serve
 node dist/index.js --serve --port=3000
 ```
 
-若已設定 `RLM_HTTPS_KEY_PATH` / `RLM_HTTPS_CERT_PATH`（或 `RLM_HTTPS_ENABLED=true`），會自動使用 HTTPS，
-否則回退為 HTTP。
+若已設定 `RLM_HTTPS_KEY_PATH` / `RLM_HTTPS_CERT_PATH`，會自動使用 HTTPS，
+否則回退為 HTTP。放在 `certs/localhost.key` 和 `certs/localhost.crt` 也會被自動偵測。
+
+## 同時啟動（Stdio + HTTP/HTTPS）
+
+```bash
+node dist/index.js --all --port=3000
+```
+或使用：
+
+```bash
+npm run all
+```
+
+若指定的埠被占用，`--all` 會自動嘗試下一個可用埠。
 
 ## MCP 客戶端設定
 
@@ -110,6 +123,25 @@ node dist/index.js --serve --port=3000
 ```
 
 也可以調小 `context_chars` 取得更短的上下文片段。
+
+## HTTP OAuth2
+
+設定 `RLM_OAUTH_ENABLED=true` 後，`/mcp` 需要 Bearer token：
+
+```bash
+curl -X POST http://localhost:3000/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=rlm-client&client_secret=rlm-secret&scope=mcp"
+```
+
+取得 token 後呼叫：
+
+```bash
+curl -X POST http://localhost:3000/mcp \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
 
 ## 更多文件
 

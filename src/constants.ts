@@ -3,11 +3,14 @@
  * Centralized configuration constants.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+
 // ===========================================
 // Server Info
 // ===========================================
 export const SERVER_NAME = 'rlm-mcp-server';
-export const SERVER_VERSION = '2.3.0';
+export const SERVER_VERSION = '2.4.0';
 
 // ===========================================
 // Response Limits
@@ -113,12 +116,36 @@ export const CACHE_CONFIG = {
 // ===========================================
 // Storage Configuration
 // ===========================================
+const parseBoolean = (value?: string): boolean => {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+};
+
+const parseNumber = (value: string | undefined, fallback: number): number => {
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const DEFAULT_STORAGE_DIR = path.join(process.cwd(), '.rlm_storage');
+const STORAGE_DIR_ENV = process.env.RLM_STORAGE_DIR;
+const RESOLVED_STORAGE_DIR = STORAGE_DIR_ENV === undefined
+  ? DEFAULT_STORAGE_DIR
+  : STORAGE_DIR_ENV.trim();
+
 export const STORAGE_CONFIG = {
-  // Base directory for persisted contexts (opt-in)
-  BASE_DIR: process.env.RLM_STORAGE_DIR || '',
+  // Base directory for persisted contexts (defaults to .rlm_storage)
+  BASE_DIR: RESOLVED_STORAGE_DIR,
   
   // Enable persistence when a base directory is configured
-  ENABLED: Boolean(process.env.RLM_STORAGE_DIR),
+  ENABLED: RESOLVED_STORAGE_DIR.length > 0,
+
+  // Optional snapshots of prior context versions
+  SNAPSHOTS_ENABLED: parseBoolean(process.env.RLM_STORAGE_SNAPSHOTS),
+
+  // Max snapshots kept per context
+  MAX_SNAPSHOTS: parseNumber(process.env.RLM_STORAGE_MAX_SNAPSHOTS, 5),
 };
 
 // ===========================================
@@ -138,14 +165,36 @@ export const INDEX_CONFIG = {
 // ===========================================
 export const HTTP_CONFIG = {
   // Request body size limit
-  MAX_BODY_SIZE: '100mb',
+  MAX_BODY_SIZE: process.env.RLM_HTTP_MAX_BODY_SIZE || '100mb',
+
+  // Max body size in bytes for early rejection
+  MAX_BODY_BYTES: parseNumber(process.env.RLM_HTTP_MAX_BODY_BYTES, 100 * 1024 * 1024),
   
   // Default port
-  DEFAULT_PORT: 3000,
+  DEFAULT_PORT: parseNumber(process.env.PORT, 3000),
+
+  // Max concurrent HTTP requests
+  MAX_CONCURRENT_REQUESTS: parseNumber(process.env.RLM_HTTP_MAX_CONCURRENT_REQUESTS, 8),
   
   // Request timeout
-  REQUEST_TIMEOUT_MS: 300000, // 5 minutes
+  REQUEST_TIMEOUT_MS: parseNumber(process.env.RLM_HTTP_REQUEST_TIMEOUT_MS, 300000), // 5 minutes
+
+  // HTTPS settings
+  HTTPS_ENABLED: parseBoolean(process.env.RLM_HTTPS_ENABLED),
+  HTTPS_KEY_PATH: process.env.RLM_HTTPS_KEY_PATH || '',
+  HTTPS_CERT_PATH: process.env.RLM_HTTPS_CERT_PATH || '',
+  HTTPS_KEY_PASSPHRASE: process.env.RLM_HTTPS_KEY_PASSPHRASE || ''
 };
+
+const DEFAULT_HTTPS_KEY_PATH = path.join(process.cwd(), 'certs', 'localhost.key');
+const DEFAULT_HTTPS_CERT_PATH = path.join(process.cwd(), 'certs', 'localhost.crt');
+
+if (!HTTP_CONFIG.HTTPS_KEY_PATH && fs.existsSync(DEFAULT_HTTPS_KEY_PATH)) {
+  HTTP_CONFIG.HTTPS_KEY_PATH = DEFAULT_HTTPS_KEY_PATH;
+}
+if (!HTTP_CONFIG.HTTPS_CERT_PATH && fs.existsSync(DEFAULT_HTTPS_CERT_PATH)) {
+  HTTP_CONFIG.HTTPS_CERT_PATH = DEFAULT_HTTPS_CERT_PATH;
+}
 
 // ===========================================
 // Logging Configuration
