@@ -16,6 +16,7 @@
 | `RLM_MODEL` | Root model for RLM controller | `gpt-4o-mini` |
 | `RLM_SUB_MODEL` | Sub-model for recursive calls | `gpt-4o-mini` |
 | `PORT` | HTTP server port | `3000` |
+| `RLM_STORAGE_DIR` | Enable persisted context storage | - |
 
 ## Using Different LLM Providers
 

@@ -1,6 +1,8 @@
-# RLM MCP Server v2.0
+# RLM MCP Server v2.4.0
 
 **Recursive Language Model Infrastructure Server** - Enables ANY LLM to process arbitrarily long contexts through recursive decomposition.
+
+English | [中文文档](docs/README_ZH.md)
 
 ## 🎯 Key Design Principle
 
@@ -125,8 +127,11 @@ Add to your MCP server configuration:
 | Tool | Description |
 |------|-------------|
 | `rlm_load_context` | Load text content into session |
+| `rlm_append_context` | Append or prepend content to an existing context |
+| `rlm_load_context_from_storage` | Load a persisted context into memory |
 | `rlm_get_context_info` | Get metadata and preview |
 | `rlm_read_context` | Read portion by chars or lines |
+| `rlm_unload_context` | Unload a context from memory (keeps storage copy) |
 
 ### Decomposition
 
@@ -136,12 +141,21 @@ Add to your MCP server configuration:
 | `rlm_get_chunks` | Retrieve specific chunk contents |
 | `rlm_suggest_strategy` | Get recommended chunking strategy |
 
+`rlm_decompose_context` returns a `decompose_id`; pass it to `rlm_get_chunks` or `rlm_rank_chunks` (or use `use_last_decompose`) to reuse options without repeating chunk parameters.
+When `decompose_id` is provided, the server uses the context stored in that decomposition record.
+When using `use_last_decompose`, the server reuses the latest decomposition for the specified `context_id` (or the most recent decomposition in the session if the context is omitted or missing).
+
 ### Search
 
 | Tool | Description |
 |------|-------------|
 | `rlm_search_context` | Search with regex patterns |
 | `rlm_find_all` | Find all substring occurrences |
+| `rlm_rank_chunks` | Rank chunks with lexical BM25 scoring |
+
+Search and ranking tools return `cache_hit` for repeated queries within a session.
+For CJK text, use `rlm_rank_chunks` with `tokenizer: "cjk_bigrams"` (or keep `tokenizer: "auto"`).
+Use `compact: true` or a smaller `context_chars` value in `rlm_search_context` to keep results short.
 
 ### Code Execution
 
@@ -167,6 +181,16 @@ Add to your MCP server configuration:
 | `rlm_clear_session` | Clear session data |
 | `rlm_get_statistics` | Get detailed statistics |
 
+### Tutorial Resources
+
+Tutorials are exposed as MCP resources (use `resources/list` and `resources/read`).
+
+| Resource | Description |
+|----------|-------------|
+| `rlm://tutorials` | Tutorial index (JSON) |
+| `rlm://tutorials/quickstart` | Quickstart overview |
+| `rlm://tutorials/quickstart/step/1` | Quickstart step 1 |
+
 ## Decomposition Strategies
 
 | Strategy | Description | Best For |
@@ -177,6 +201,26 @@ Add to your MCP server configuration:
 | `by_sections` | Split on markdown headers | Markdown docs |
 | `by_regex` | Split on custom pattern | Custom formats |
 | `by_sentences` | Split into sentences | Dense text |
+| `by_tokens` | Chunk by token count (tiktoken) | Align to model limits |
+
+Note: `by_tokens` requires the `tiktoken` package to be installed.
+For `by_sections`, you can use `merge_empty_sections` and `min_section_length` to reduce tiny chunks.
+
+Storage note: persistence defaults to `.rlm_storage` in the server working directory.
+Set `RLM_STORAGE_DIR` to override the path, or set it to an empty string to disable persistence.
+Chunk metadata is
+persisted alongside contexts. Use `RLM_STORAGE_SNAPSHOTS=true` (and
+`RLM_STORAGE_MAX_SNAPSHOTS`) to keep historical snapshots.
+
+HTTP note: tune `RLM_HTTP_MAX_CONCURRENT_REQUESTS` and `RLM_HTTP_MAX_BODY_SIZE`
+to control backpressure in HTTP mode.
+
+HTTPS note: set `RLM_HTTPS_KEY_PATH` and `RLM_HTTPS_CERT_PATH` (optionally
+`RLM_HTTPS_KEY_PASSPHRASE`) and start with `--https` (or set
+`RLM_HTTPS_ENABLED=true`) to enable TLS.
+
+Chunk metadata includes `tags` (for example: `["section", "level-2"]`) to
+surface structural hints.
 
 ## REPL Environment Functions
 
@@ -284,6 +328,11 @@ Here's how an LLM might process a very long document:
 - Entity extraction from large texts
 - Pattern mining
 - Content classification
+
+## Roadmap and Evaluation
+
+- Roadmap: `docs/ROADMAP.md`
+- Evaluation plan: `docs/EVALUATION.md`
 
 ## Architecture
 

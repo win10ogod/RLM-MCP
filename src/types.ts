@@ -97,7 +97,8 @@ export enum DecompositionStrategy {
   BY_PARAGRAPHS = 'by_paragraphs',
   BY_SECTIONS = 'by_sections',
   BY_REGEX = 'by_regex',
-  BY_SENTENCES = 'by_sentences'
+  BY_SENTENCES = 'by_sentences',
+  BY_TOKENS = 'by_tokens'
 }
 
 /**

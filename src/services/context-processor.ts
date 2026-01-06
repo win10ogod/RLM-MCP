@@ -1,7 +1,7 @@
 /**
- * Context Processor Service
- * Provides context decomposition, search, and manipulation utilities
- * These tools enable the client's LLM to implement RLM patterns
+ * Context Processor Service - v2.3
+ * Provides context decomposition, search, and manipulation utilities.
+ * Integrates security checks and caching support.
  */
 
 import {
@@ -14,64 +14,163 @@ import {
   DEFAULT_CHUNK_SIZE,
   DEFAULT_OVERLAP,
   DEFAULT_LINES_PER_CHUNK,
-  MAX_SEARCH_RESULTS
+  DEFAULT_TOKENS_PER_CHUNK,
+  DEFAULT_TOKEN_OVERLAP,
+  MAX_SEARCH_RESULTS,
+  RESOURCE_LIMITS,
+  REGEX_LIMITS
 } from '../constants.js';
+import { Errors, RLMError, ErrorCode } from '../errors/index.js';
+import { logger } from '../utils/logger.js';
+import { metrics, MetricNames } from '../utils/metrics.js';
+import { 
+  validateRegexPattern, 
+  safeRegexSearch 
+} from '../utils/security.js';
+import { getTiktokenEncoding, freeEncoding } from '../utils/tokenizer.js';
+import { chunkCache } from './chunk-cache.js';
+
+/**
+ * Decomposition options
+ */
+interface DecomposeOptions {
+  chunkSize?: number;
+  overlap?: number;
+  linesPerChunk?: number;
+  tokensPerChunk?: number;
+  tokenOverlap?: number;
+  separator?: string;
+  pattern?: string;
+  model?: string;
+  encoding?: string;
+}
 
 export class ContextProcessor {
   
   /**
-   * Decompose context into chunks
+   * Decompose content into chunks, with optional cache support.
    */
   decompose(
     content: string,
     strategy: DecompositionStrategy,
-    options: {
-      chunkSize?: number;
-      overlap?: number;
-      linesPerChunk?: number;
-      separator?: string;
-      pattern?: string;
-    } = {}
+    options: DecomposeOptions = {},
+    cacheInfo?: { contextId: string; sessionId: string }
   ): Chunk[] {
-    switch (strategy) {
-      case DecompositionStrategy.FIXED_SIZE:
-        return this.decomposeBySize(
-          content,
-          options.chunkSize || DEFAULT_CHUNK_SIZE,
-          options.overlap || DEFAULT_OVERLAP
+    const timer = metrics.startTimer(MetricNames.DECOMPOSE_DURATION_MS);
+    
+    try {
+      // Try cached chunks first.
+      if (cacheInfo) {
+        const contentHash = chunkCache.createContentHash(content);
+        const cached = chunkCache.get(
+          cacheInfo.contextId,
+          cacheInfo.sessionId,
+          strategy,
+          options,
+          contentHash
         );
+        
+        if (cached) {
+          logger.debug('Using cached chunks', { 
+            contextId: cacheInfo.contextId, 
+            strategy,
+            chunksCount: cached.length 
+          });
+          return cached;
+        }
+      }
       
-      case DecompositionStrategy.BY_LINES:
-        return this.decomposeByLines(
-          content,
-          options.linesPerChunk || DEFAULT_LINES_PER_CHUNK,
-          options.overlap || 10
+      // Run decomposition strategy.
+      let chunks: Chunk[];
+      
+      switch (strategy) {
+        case DecompositionStrategy.FIXED_SIZE:
+          chunks = this.decomposeBySize(
+            content,
+            options.chunkSize || DEFAULT_CHUNK_SIZE,
+            options.overlap || DEFAULT_OVERLAP
+          );
+          break;
+        
+        case DecompositionStrategy.BY_LINES:
+          chunks = this.decomposeByLines(
+            content,
+            options.linesPerChunk || DEFAULT_LINES_PER_CHUNK,
+            options.overlap || 10
+          );
+          break;
+        
+        case DecompositionStrategy.BY_PARAGRAPHS:
+          chunks = this.decomposeByParagraphs(content);
+          break;
+        
+        case DecompositionStrategy.BY_SECTIONS:
+          chunks = this.decomposeBySections(content);
+          break;
+        
+        case DecompositionStrategy.BY_REGEX:
+          chunks = this.decomposeByRegex(content, options.pattern || '\n\n+');
+          break;
+        
+        case DecompositionStrategy.BY_SENTENCES:
+          chunks = this.decomposeBySentences(content);
+          break;
+
+        case DecompositionStrategy.BY_TOKENS:
+          chunks = this.decomposeByTokens(
+            content,
+            options.tokensPerChunk || DEFAULT_TOKENS_PER_CHUNK,
+            options.tokenOverlap || DEFAULT_TOKEN_OVERLAP,
+            {
+              model: options.model,
+              encoding: options.encoding
+            }
+          );
+          break;
+        
+        default:
+          chunks = this.decomposeBySize(content, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP);
+      }
+      
+      // Enforce chunk count limits.
+      if (chunks.length > RESOURCE_LIMITS.MAX_CHUNKS) {
+        throw Errors.chunkLimitExceeded(chunks.length, RESOURCE_LIMITS.MAX_CHUNKS);
+      }
+      
+      // Store results in cache.
+      if (cacheInfo) {
+        const contentHash = chunkCache.createContentHash(content);
+        chunkCache.set(
+          cacheInfo.contextId,
+          cacheInfo.sessionId,
+          strategy,
+          options,
+          contentHash,
+          chunks
         );
+      }
       
-      case DecompositionStrategy.BY_PARAGRAPHS:
-        return this.decomposeByParagraphs(content);
+      logger.debug('Content decomposed', { strategy, chunksCount: chunks.length });
       
-      case DecompositionStrategy.BY_SECTIONS:
-        return this.decomposeBySections(content);
-      
-      case DecompositionStrategy.BY_REGEX:
-        return this.decomposeByRegex(content, options.pattern || '\n\n+');
-      
-      case DecompositionStrategy.BY_SENTENCES:
-        return this.decomposeBySentences(content);
-      
-      default:
-        return this.decomposeBySize(content, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP);
+      return chunks;
+    } finally {
+      timer.stop();
     }
   }
 
   /**
-   * Fixed-size chunking with overlap
+   * Fixed-size chunking with overlap.
    */
   private decomposeBySize(content: string, chunkSize: number, overlap: number): Chunk[] {
     const chunks: Chunk[] = [];
     let index = 0;
     let offset = 0;
+
+    // Prevent infinite loops when overlap is invalid.
+    const step = chunkSize - overlap;
+    if (step <= 0) {
+      throw Errors.invalidInput('overlap', 'Overlap must be smaller than chunk size');
+    }
 
     while (offset < content.length) {
       const end = Math.min(offset + chunkSize, content.length);
@@ -83,18 +182,18 @@ export class ContextProcessor {
         endOffset: end
       });
 
-      offset += chunkSize - overlap;
+      offset += step;
       index++;
 
-      // Prevent infinite loop
-      if (chunkSize - overlap <= 0) break;
+      // Safety cap.
+      if (index > RESOURCE_LIMITS.MAX_CHUNKS) break;
     }
 
     return chunks;
   }
 
   /**
-   * Chunk by lines
+   * Chunk content by line count.
    */
   private decomposeByLines(content: string, linesPerChunk: number, overlapLines: number): Chunk[] {
     const lines = content.split('\n');
@@ -103,70 +202,94 @@ export class ContextProcessor {
     let lineIndex = 0;
     let charOffset = 0;
 
+    // Precompute line start offsets.
+    const lineOffsets: number[] = [0];
+    for (let i = 0; i < lines.length - 1; i++) {
+      lineOffsets.push(lineOffsets[i] + lines[i].length + 1);
+    }
+
+    const advanceLines = Math.max(1, linesPerChunk - overlapLines);
+
     while (lineIndex < lines.length) {
-      const chunkLines = lines.slice(lineIndex, lineIndex + linesPerChunk);
+      const endLineIndex = Math.min(lineIndex + linesPerChunk, lines.length);
+      const chunkLines = lines.slice(lineIndex, endLineIndex);
       const chunkContent = chunkLines.join('\n');
-      const endOffset = charOffset + chunkContent.length;
+      
+      const startOffset = lineOffsets[lineIndex];
+      const endOffset = lineIndex + linesPerChunk >= lines.length 
+        ? content.length 
+        : lineOffsets[endLineIndex];
 
       chunks.push({
         index,
         content: chunkContent,
-        startOffset: charOffset,
+        startOffset,
         endOffset,
         metadata: {
           startLine: lineIndex,
-          endLine: Math.min(lineIndex + linesPerChunk, lines.length) - 1
+          endLine: endLineIndex - 1,
+          lineCount: chunkLines.length
         }
       });
 
-      // Calculate next position
-      const advanceLines = Math.max(1, linesPerChunk - overlapLines);
-      for (let i = 0; i < advanceLines && lineIndex + i < lines.length; i++) {
-        charOffset += lines[lineIndex + i].length + 1; // +1 for newline
-      }
-      
       lineIndex += advanceLines;
       index++;
+
+      // Safety cap.
+      if (index > RESOURCE_LIMITS.MAX_CHUNKS) break;
     }
 
     return chunks;
   }
 
   /**
-   * Chunk by paragraphs (double newlines)
+   * Chunk content by paragraphs (double newlines).
    */
   private decomposeByParagraphs(content: string): Chunk[] {
     const paragraphs = content.split(/\n\n+/);
     const chunks: Chunk[] = [];
     let offset = 0;
+    let index = 0;
 
-    paragraphs.forEach((para, index) => {
-      if (para.trim()) {
-        const startOffset = content.indexOf(para, offset);
+    for (const para of paragraphs) {
+      const trimmedPara = para.trim();
+      if (trimmedPara) {
+        // Find the real offsets relative to the original content.
+        const actualStart = content.indexOf(para, offset);
+        const startOffset = actualStart >= 0 ? actualStart : offset;
+        
         chunks.push({
           index,
-          content: para.trim(),
+          content: trimmedPara,
           startOffset,
-          endOffset: startOffset + para.length
+          endOffset: startOffset + para.length,
+          metadata: {
+            type: 'paragraph',
+            originalLength: para.length
+          }
         });
+        
         offset = startOffset + para.length;
+        index++;
+
+        // Safety cap.
+        if (index > RESOURCE_LIMITS.MAX_CHUNKS) break;
       }
-    });
+    }
 
     return chunks;
   }
 
   /**
-   * Chunk by sections (markdown headers)
+   * Chunk content by Markdown section headers.
    */
   private decomposeBySections(content: string): Chunk[] {
     const sectionPattern = /^(#{1,6})\s+(.+)$/gm;
     const sections: Chunk[] = [];
-    let lastIndex = 0;
     let index = 0;
-    let match;
 
     const matches: Array<{ start: number; level: number; title: string }> = [];
+    let match;
     
     while ((match = sectionPattern.exec(content)) !== null) {
       matches.push({
@@ -176,17 +299,18 @@ export class ContextProcessor {
       });
     }
 
-    // If no sections found, return as single chunk
+    // If no headers exist, return a single chunk.
     if (matches.length === 0) {
       return [{
         index: 0,
         content: content,
         startOffset: 0,
-        endOffset: content.length
+        endOffset: content.length,
+        metadata: { type: 'single' }
       }];
     }
 
-    // Add content before first section if any
+    // Include preamble content before the first header.
     if (matches[0].start > 0) {
       const preContent = content.slice(0, matches[0].start).trim();
       if (preContent) {
@@ -200,7 +324,7 @@ export class ContextProcessor {
       }
     }
 
-    // Process each section
+    // Split each section by header boundaries.
     for (let i = 0; i < matches.length; i++) {
       const current = matches[i];
       const next = matches[i + 1];
@@ -217,62 +341,90 @@ export class ContextProcessor {
           type: 'section'
         }
       });
+
+      // Safety cap.
+      if (index > RESOURCE_LIMITS.MAX_CHUNKS) break;
     }
 
     return sections;
   }
 
   /**
-   * Chunk by custom regex pattern
+   * Chunk content by a custom regex separator.
    */
   private decomposeByRegex(content: string, pattern: string): Chunk[] {
+    // Validate regex safety before use.
+    const validation = validateRegexPattern(pattern);
+    if (!validation.valid) {
+      throw Errors.invalidRegex(pattern, validation.error!);
+    }
+
     const regex = new RegExp(pattern, 'g');
     const parts = content.split(regex);
     const chunks: Chunk[] = [];
     let offset = 0;
+    let index = 0;
 
-    parts.forEach((part, index) => {
-      if (part.trim()) {
-        const startOffset = content.indexOf(part, offset);
+    for (const part of parts) {
+      const trimmedPart = part.trim();
+      if (trimmedPart) {
+        const actualStart = content.indexOf(part, offset);
+        const startOffset = actualStart >= 0 ? actualStart : offset;
+        
         chunks.push({
           index,
-          content: part.trim(),
+          content: trimmedPart,
           startOffset,
           endOffset: startOffset + part.length
         });
+        
         offset = startOffset + part.length;
+        index++;
+
+        // Safety cap.
+        if (index > RESOURCE_LIMITS.MAX_CHUNKS) break;
       }
-    });
+    }
 
     return chunks;
   }
 
   /**
-   * Chunk by sentences
+   * Chunk content by sentence boundaries.
    */
   private decomposeBySentences(content: string): Chunk[] {
-    // Simple sentence splitting (handles common cases)
-    const sentencePattern = /[^.!?]+[.!?]+\s*/g;
+    // Sentence splitter tuned for simple punctuation-based boundaries.
+    const sentencePattern = /[^.!?]+[.!?]+[\s]*/g;
     const sentences: Chunk[] = [];
     let match;
     let index = 0;
 
     while ((match = sentencePattern.exec(content)) !== null) {
-      sentences.push({
-        index: index++,
-        content: match[0].trim(),
-        startOffset: match.index,
-        endOffset: match.index + match[0].length
-      });
+      const trimmed = match[0].trim();
+      if (trimmed) {
+        sentences.push({
+          index: index++,
+          content: trimmed,
+          startOffset: match.index,
+          endOffset: match.index + match[0].length,
+          metadata: {
+            type: 'sentence'
+          }
+        });
+      }
+
+      // Safety cap.
+      if (index > RESOURCE_LIMITS.MAX_CHUNKS) break;
     }
 
-    // Handle content without sentence endings
+    // Handle content without terminal punctuation.
     if (sentences.length === 0 && content.trim()) {
       return [{
         index: 0,
         content: content.trim(),
         startOffset: 0,
-        endOffset: content.length
+        endOffset: content.length,
+        metadata: { type: 'single' }
       }];
     }
 
@@ -280,9 +432,164 @@ export class ContextProcessor {
   }
 
   /**
-   * Search content with regex
+   * Chunk content by token count using tiktoken.
    */
-  search(
+  private decomposeByTokens(
+    content: string,
+    tokensPerChunk: number,
+    overlapTokens: number,
+    tokenizerOptions: { model?: string; encoding?: string }
+  ): Chunk[] {
+    if (tokensPerChunk <= 0) {
+      throw Errors.invalidInput('tokens_per_chunk', 'Tokens per chunk must be greater than 0');
+    }
+
+    if (overlapTokens < 0) {
+      throw Errors.invalidInput('token_overlap', 'Token overlap must be 0 or greater');
+    }
+
+    const step = tokensPerChunk - overlapTokens;
+    if (step <= 0) {
+      throw Errors.invalidInput('token_overlap', 'Token overlap must be smaller than tokens_per_chunk');
+    }
+
+    const encoding = getTiktokenEncoding(tokenizerOptions);
+
+    try {
+      const tokens = encoding.encode(content);
+      const tokenLengths = new Array(tokens.length);
+      const tokenOffsets = new Array(tokens.length + 1);
+      tokenOffsets[0] = 0;
+
+      for (let i = 0; i < tokens.length; i++) {
+        const tokenText = encoding.decode([tokens[i]]);
+        tokenLengths[i] = tokenText.length;
+        tokenOffsets[i + 1] = tokenOffsets[i] + tokenLengths[i];
+      }
+
+      const chunks: Chunk[] = [];
+      let index = 0;
+
+      for (let start = 0; start < tokens.length; start += step) {
+        const end = Math.min(start + tokensPerChunk, tokens.length);
+        const chunkTokens = tokens.slice(start, end);
+        const chunkText = encoding.decode(chunkTokens);
+
+        chunks.push({
+          index,
+          content: chunkText,
+          startOffset: tokenOffsets[start],
+          endOffset: tokenOffsets[end],
+          metadata: {
+            token_start: start,
+            token_end: end,
+            token_count: end - start,
+            model: tokenizerOptions.model,
+            encoding: tokenizerOptions.encoding
+          }
+        });
+
+        index++;
+
+        if (index > RESOURCE_LIMITS.MAX_CHUNKS) break;
+      }
+
+      return chunks;
+    } finally {
+      freeEncoding(encoding);
+    }
+  }
+
+  /**
+   * Search content with a safe regex implementation.
+   */
+  async search(
+    content: string,
+    pattern: string,
+    options: {
+      flags?: string;
+      contextChars?: number;
+      maxResults?: number;
+      includeLineNumbers?: boolean;
+    } = {}
+  ): Promise<SearchMatch[]> {
+    const timer = metrics.startTimer(MetricNames.SEARCH_DURATION_MS);
+    metrics.increment(MetricNames.SEARCHES);
+    
+    const {
+      flags = 'gi',
+      contextChars = 100,
+      maxResults = MAX_SEARCH_RESULTS,
+      includeLineNumbers = true
+    } = options;
+
+    try {
+      // Run the safe regex search with limits.
+      const matches = await safeRegexSearch(pattern, content, {
+        flags,
+        timeoutMs: REGEX_LIMITS.MAX_EXECUTION_TIME_MS,
+        maxMatches: maxResults
+      });
+      
+      const results: SearchMatch[] = [];
+      
+      // Precompute line starts for binary search.
+      let lineStarts: number[] = [];
+      if (includeLineNumbers) {
+        lineStarts = [0];
+        for (let i = 0; i < content.length; i++) {
+          if (content[i] === '\n') {
+            lineStarts.push(i + 1);
+          }
+        }
+      }
+      
+      for (const match of matches) {
+        if (match.index === undefined) {
+          continue;
+        }
+
+        const matchIndex = match.index;
+        const start = Math.max(0, matchIndex - contextChars);
+        const end = Math.min(content.length, matchIndex + match[0].length + contextChars);
+        
+        let lineNumber = 0;
+        if (includeLineNumbers) {
+          // Binary search to locate the line number.
+          let low = 0, high = lineStarts.length - 1;
+          while (low < high) {
+            const mid = Math.ceil((low + high) / 2);
+            if (lineStarts[mid] <= matchIndex) {
+              low = mid;
+            } else {
+              high = mid - 1;
+            }
+          }
+          lineNumber = low + 1; // 1-based
+        }
+
+        results.push({
+          match: match[0],
+          index: matchIndex,
+          lineNumber,
+          context: content.slice(start, end),
+          groups: match.slice(1)
+        });
+      }
+      
+      return results;
+    } catch (error) {
+      if (error instanceof RLMError) throw error;
+      throw Errors.invalidRegex(pattern, (error as Error).message);
+    } finally {
+      timer.stop();
+    }
+  }
+
+  /**
+   * Synchronous search for legacy callers.
+   */
+  searchSync(
     content: string,
     pattern: string,
     options: {
@@ -300,6 +607,13 @@ export class ContextProcessor {
     } = options;
 
     const results: SearchMatch[] = [];
+    
+    // Validate regex safety before running.
+    const validation = validateRegexPattern(pattern);
+    if (!validation.valid) {
+      logger.warn('Invalid regex pattern in searchSync', { pattern, error: validation.error });
+      return results;
+    }
     
     try {
       const regex = new RegExp(pattern, flags);
@@ -322,20 +636,20 @@ export class ContextProcessor {
           groups: match.slice(1)
         });
 
-        // Prevent infinite loop with zero-length matches
+        // Prevent infinite loops on zero-length matches.
         if (match[0].length === 0) {
           regex.lastIndex++;
         }
       }
     } catch (error) {
-      // Invalid regex - return empty results
+      logger.warn('Regex search error', { pattern, error: (error as Error).message });
     }
 
     return results;
   }
 
   /**
-   * Extract lines by range
+   * Extract a line range from content.
    */
   extractLines(content: string, startLine: number, endLine?: number): string {
     const lines = content.split('\n');
@@ -344,14 +658,14 @@ export class ContextProcessor {
   }
 
   /**
-   * Extract by character range
+   * Extract a character range from content.
    */
   extractRange(content: string, start: number, end: number): string {
     return content.slice(start, end);
   }
 
   /**
-   * Get context summary statistics
+   * Compute basic statistics for a context.
    */
   getStatistics(content: string): {
     length: number;
@@ -361,6 +675,7 @@ export class ContextProcessor {
     paragraphCount: number;
     avgLineLength: number;
     avgWordLength: number;
+    charFrequency?: Record<string, number>;
   } {
     const lines = content.split('\n');
     const words = content.split(/\s+/).filter(w => w.length > 0);
@@ -373,21 +688,25 @@ export class ContextProcessor {
       wordCount: words.length,
       sentenceCount: sentences.length,
       paragraphCount: paragraphs.length,
-      avgLineLength: Math.round(content.length / lines.length),
-      avgWordLength: Math.round(words.join('').length / words.length)
+      avgLineLength: lines.length > 0 ? Math.round(content.length / lines.length) : 0,
+      avgWordLength: words.length > 0 ? Math.round(words.join('').length / words.length) : 0
     };
   }
 
   /**
-   * Find all occurrences of a substring
+   * Find all substring offsets in content.
    */
   findAll(content: string, substring: string, caseSensitive: boolean = false): number[] {
     const indices: number[] = [];
     const searchContent = caseSensitive ? content : content.toLowerCase();
     const searchTerm = caseSensitive ? substring : substring.toLowerCase();
     
+    if (searchTerm.length === 0) return indices;
+    
     let index = 0;
-    while ((index = searchContent.indexOf(searchTerm, index)) !== -1) {
+    const maxResults = REGEX_LIMITS.MAX_MATCHES;
+    
+    while ((index = searchContent.indexOf(searchTerm, index)) !== -1 && indices.length < maxResults) {
       indices.push(index);
       index += searchTerm.length;
     }
@@ -396,7 +715,7 @@ export class ContextProcessor {
   }
 
   /**
-   * Get suggested decomposition strategy based on content
+   * Suggest a decomposition strategy based on content structure.
    */
   suggestStrategy(content: string, structure: StructureType): {
     strategy: DecompositionStrategy;
@@ -405,7 +724,7 @@ export class ContextProcessor {
   } {
     const stats = this.getStatistics(content);
 
-    // For structured data
+    // Structured data handling.
     if (structure === StructureType.JSON) {
       return {
         strategy: DecompositionStrategy.FIXED_SIZE,
@@ -446,7 +765,7 @@ export class ContextProcessor {
       };
     }
 
-    // For plain text
+    // Plain text heuristics.
     if (stats.paragraphCount > 10) {
       return {
         strategy: DecompositionStrategy.BY_PARAGRAPHS,
@@ -471,5 +790,5 @@ export class ContextProcessor {
   }
 }
 
-// Singleton instance
+// Singleton instance.
 export const contextProcessor = new ContextProcessor();

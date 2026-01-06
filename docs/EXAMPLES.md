@@ -19,6 +19,16 @@ Tool: rlm_load_context
 }
 ```
 
+**Optional: Stream additional chunks**
+```json
+Tool: rlm_append_context
+{
+  "context_id": "paper",
+  "content": "... next 100,000 characters ...",
+  "mode": "append"
+}
+```
+
 **Step 2: Analyze structure**
 ```json
 Tool: rlm_get_context_info
@@ -68,9 +78,33 @@ Tool: rlm_decompose_context
   "return_content": false
 }
 ```
+
+**Optional: Merge tiny or empty sections**
+```json
+Tool: rlm_decompose_context
+{
+  "context_id": "paper",
+  "strategy": "by_sections",
+  "merge_empty_sections": true,
+  "min_section_length": 200
+}
+```
+
+**Alternative: Token-based chunking**
+```json
+Tool: rlm_decompose_context
+{
+  "context_id": "paper",
+  "strategy": "by_tokens",
+  "tokens_per_chunk": 2000,
+  "token_overlap": 200,
+  "model": "gpt-4o-mini"
+}
+```
 Response:
 ```json
 {
+  "decompose_id": "decompose_1736520000000_ab12cd",
   "total_chunks": 45,
   "strategy": "by_sections",
   "chunks": [
@@ -80,6 +114,7 @@ Response:
   ]
 }
 ```
+You can reuse `decompose_id` with `rlm_get_chunks` or `rlm_rank_chunks` to avoid repeating chunking parameters.
 
 **Step 5: Get key sections**
 ```json
@@ -87,9 +122,10 @@ Tool: rlm_get_chunks
 {
   "context_id": "paper",
   "chunk_indices": [0, 1, 44],  // Abstract, Introduction, Conclusion
-  "strategy": "by_sections"
+  "decompose_id": "decompose_1736520000000_ab12cd"
 }
 ```
+You can also set `"use_last_decompose": true` to reuse the most recent decomposition for a context.
 
 **Step 6: Search for key terms**
 ```json
@@ -98,6 +134,28 @@ Tool: rlm_search_context
   "context_id": "paper",
   "pattern": "conclusion|finding|result|significant",
   "max_results": 20
+}
+```
+
+**Alternative: Rank chunks with BM25**
+```json
+Tool: rlm_rank_chunks
+{
+  "decompose_id": "decompose_1736520000000_ab12cd",
+  "query": "key findings and conclusions",
+  "top_k": 5
+}
+```
+
+For CJK text, set `tokenizer` to `cjk_bigrams`:
+```json
+Tool: rlm_rank_chunks
+{
+  "context_id": "paper",
+  "query": "搜尋功能如何使用",
+  "strategy": "by_sections",
+  "top_k": 5,
+  "tokenizer": "cjk_bigrams"
 }
 ```
 
@@ -371,6 +429,36 @@ Use variables to maintain state across operations:
 
 ---
 
+### Example 6: Tutorial Resources
+
+```
+User: "Teach me how to use the RLM tools"
+```
+
+**Step 1: List tutorial resources**
+```json
+Method: resources/list
+{}
+```
+
+**Step 2: Read the tutorial index**
+```json
+Method: resources/read
+{
+  "uri": "rlm://tutorials"
+}
+```
+
+**Step 3: Read the first step**
+```json
+Method: resources/read
+{
+  "uri": "rlm://tutorials/quickstart/step/1"
+}
+```
+
+---
+
 ## Tips for Best Results
 
 1. **Start with analysis** - Use `rlm_get_context_info` and `rlm_get_statistics` first
@@ -379,3 +467,4 @@ Use variables to maintain state across operations:
 4. **Use code for data work** - `rlm_execute_code` is powerful for manipulation
 5. **Build incrementally** - Use `rlm_set_answer` with `ready=false` for drafts
 6. **Store intermediate results** - Use variables to avoid re-processing
+7. **Keep search output short** - Set `compact: true` or reduce `context_chars`
