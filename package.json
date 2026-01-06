@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "serve": "node dist/index.js --serve",
+    "serve": "npm run build && node dist/index.js --serve",
     "dev": "tsx src/index.ts",
     "dev:serve": "tsx src/index.ts --serve",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
