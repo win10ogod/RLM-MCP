@@ -378,6 +378,14 @@ For MCP clients like Claude Desktop:
 node dist/index.js
 ```
 
+### Serve (Auto HTTP/HTTPS)
+For quick local testing without extra flags:
+```bash
+node dist/index.js --serve --port=3000
+```
+Uses HTTPS when `RLM_HTTPS_KEY_PATH` and `RLM_HTTPS_CERT_PATH` are configured (or `RLM_HTTPS_ENABLED=true`),
+otherwise falls back to HTTP.
+
 ### HTTP
 For remote access or testing:
 ```bash

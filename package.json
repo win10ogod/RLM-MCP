@@ -1,14 +1,17 @@
 {
   "name": "rlm-mcp-server",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "Recursive Language Model (RLM) MCP Server - Enable any LLM to process arbitrarily long contexts through recursive decomposition",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "serve": "node dist/index.js --serve",
     "dev": "tsx src/index.ts",
-    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
+    "dev:serve": "tsx src/index.ts --serve",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
+    "test": "node scripts/run-tests.mjs"
   },
   "keywords": [
     "mcp",

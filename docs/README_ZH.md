@@ -20,6 +20,21 @@ npm run build
 npm start
 ```
 
+## 一鍵啟動（HTTP/HTTPS 自動）
+
+```bash
+npm run serve
+```
+
+也可以直接使用：
+
+```bash
+node dist/index.js --serve --port=3000
+```
+
+若已設定 `RLM_HTTPS_KEY_PATH` / `RLM_HTTPS_CERT_PATH`（或 `RLM_HTTPS_ENABLED=true`），會自動使用 HTTPS，
+否則回退為 HTTP。
+
 ## MCP 客戶端設定
 
 ### Claude Desktop (Windows)

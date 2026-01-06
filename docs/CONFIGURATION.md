@@ -1,107 +1,34 @@
 # RLM MCP Server Configuration Guide
 
+## Overview
+
+This server does not call external LLM APIs. Configure your LLM provider in the MCP client. The settings below only control the RLM MCP server itself.
+
 ## Environment Variables
 
 ### Required
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | API key for OpenAI or compatible API | - |
+None.
 
 ### Optional
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OPENAI_BASE_URL` | API base URL | `https://api.openai.com/v1` |
-| `RLM_MODEL` | Root model for RLM controller | `gpt-4o-mini` |
-| `RLM_SUB_MODEL` | Sub-model for recursive calls | `gpt-4o-mini` |
 | `PORT` | HTTP server port | `3000` |
-| `RLM_STORAGE_DIR` | Enable persisted context storage | - |
+| `RLM_STORAGE_DIR` | Override persisted context storage directory | `.rlm_storage` |
+| `RLM_STORAGE_SNAPSHOTS` | Enable context snapshots (`true`/`false`) | `false` |
+| `RLM_STORAGE_MAX_SNAPSHOTS` | Max snapshots per context | `5` |
+| `RLM_HTTP_MAX_CONCURRENT_REQUESTS` | Max concurrent HTTP requests | `8` |
+| `RLM_HTTP_MAX_BODY_SIZE` | HTTP JSON body size limit (express format) | `100mb` |
+| `RLM_HTTP_MAX_BODY_BYTES` | HTTP JSON body size limit (bytes) | `104857600` |
+| `RLM_HTTP_REQUEST_TIMEOUT_MS` | HTTP request timeout (ms) | `300000` |
+| `RLM_HTTPS_ENABLED` | Enable HTTPS when using `--http` | `false` |
+| `RLM_HTTPS_KEY_PATH` | Path to TLS private key (PEM) | - |
+| `RLM_HTTPS_CERT_PATH` | Path to TLS certificate (PEM) | - |
+| `RLM_HTTPS_KEY_PASSPHRASE` | Passphrase for TLS private key | - |
 
-## Using Different LLM Providers
-
-### OpenAI
-
-```bash
-export OPENAI_API_KEY="sk-..."
-export OPENAI_BASE_URL="https://api.openai.com/v1"
-export RLM_MODEL="gpt-4o"
-export RLM_SUB_MODEL="gpt-4o-mini"
-```
-
-### Azure OpenAI
-
-```bash
-export OPENAI_API_KEY="your-azure-api-key"
-export OPENAI_BASE_URL="https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT"
-export RLM_MODEL="gpt-4o"
-export RLM_SUB_MODEL="gpt-4o-mini"
-```
-
-### Local LLM (Ollama)
-
-```bash
-export OPENAI_API_KEY="ollama"  # Any string works
-export OPENAI_BASE_URL="http://localhost:11434/v1"
-export RLM_MODEL="llama3.2"
-export RLM_SUB_MODEL="llama3.2"
-```
-
-### Local LLM (llama.cpp server)
-
-```bash
-export OPENAI_API_KEY="local"  # Any string works
-export OPENAI_BASE_URL="http://localhost:8080/v1"
-export RLM_MODEL="local-model"
-export RLM_SUB_MODEL="local-model"
-```
-
-### vLLM
-
-```bash
-export OPENAI_API_KEY="vllm"
-export OPENAI_BASE_URL="http://localhost:8000/v1"
-export RLM_MODEL="meta-llama/Llama-3-8b-instruct"
-export RLM_SUB_MODEL="meta-llama/Llama-3-8b-instruct"
-```
-
-### Anthropic (via proxy)
-
-If using an OpenAI-compatible proxy for Anthropic:
-
-```bash
-export OPENAI_API_KEY="your-anthropic-key"
-export OPENAI_BASE_URL="http://localhost:3001/v1"  # Proxy URL
-export RLM_MODEL="claude-3-5-sonnet"
-export RLM_SUB_MODEL="claude-3-5-haiku"
-```
-
-## Model Selection Guide
-
-### Root Model (RLM_MODEL)
-
-The root model controls the RLM process:
-- Analyzes context structure
-- Plans decomposition strategy
-- Writes code for REPL
-- Aggregates results
-
-**Recommendations:**
-- Use a capable model with good code generation
-- GPT-4o, Claude 3.5 Sonnet, or similar
-- Balance between capability and cost
-
-### Sub-Model (RLM_SUB_MODEL)
-
-The sub-model handles recursive queries:
-- Processes individual context chunks
-- Answers specific questions
-- Can be smaller/cheaper than root model
-
-**Recommendations:**
-- GPT-4o-mini, Claude 3.5 Haiku, or similar
-- Lower latency is beneficial for batch calls
-- Cost-effective for many parallel calls
+Storage is enabled by default in `.rlm_storage` under the server working directory.
+Set `RLM_STORAGE_DIR` to change the location, or set it to an empty string to disable persistence.
 
 ## Transport Configuration
 
@@ -126,68 +53,55 @@ HTTP Endpoints:
 - `GET /health` - Health check
 - `GET /info` - Server information
 
+### Serve Mode (Auto HTTP/HTTPS)
+
+Best for quick local testing without extra flags:
+
+```bash
+node dist/index.js --serve --port=3000
+```
+
+Uses HTTPS when `RLM_HTTPS_KEY_PATH` and `RLM_HTTPS_CERT_PATH` are configured
+(or `RLM_HTTPS_ENABLED=true`), otherwise falls back to HTTP.
+
+### HTTPS Mode
+
+HTTPS requires a TLS private key and certificate. You can enable HTTPS in one of two ways:
+
+1. Use the `--https` flag (strict): the server will error if key/cert are missing.
+2. Use `--http` with `RLM_HTTPS_ENABLED=true` (conditional): HTTPS is used only when key/cert are configured.
+
+Required environment variables:
+- `RLM_HTTPS_KEY_PATH` (PEM private key)
+- `RLM_HTTPS_CERT_PATH` (PEM certificate)
+
+Optional:
+- `RLM_HTTPS_KEY_PASSPHRASE`
+
+Example:
+
+```bash
+export RLM_HTTPS_KEY_PATH="/path/to/key.pem"
+export RLM_HTTPS_CERT_PATH="/path/to/cert.pem"
+node dist/index.js --https --port=3443
+```
+
 ## Resource Limits
 
-### Iteration Limits
-
-```typescript
-{
-  max_iterations: 20,     // Default
-  max_iterations: 50,     // Maximum allowed
-}
-```
-
-Higher iterations allow more complex reasoning but increase:
-- Processing time
-- Token usage
-- Cost
-
-### Timeout Configuration
-
-```typescript
-{
-  timeout_ms: 300000,     // Default: 5 minutes
-  timeout_ms: 600000,     // Maximum: 10 minutes
-}
-```
-
-### Output Limits
-
-- `CHARACTER_LIMIT`: 50,000 characters (response truncation)
-- `MAX_OUTPUT_LENGTH`: 100,000 characters
-- `MAX_REPL_OUTPUT`: 8,192 characters per REPL execution
-
-## Performance Tuning
-
-### For Speed
-
-- Use smaller sub-model (`gpt-4o-mini`)
-- Reduce `max_iterations`
-- Use `chunk` strategy for simple tasks
-
-### For Quality
-
-- Use capable root model (`gpt-4o`)
-- Allow more iterations
-- Use `semantic` strategy for documents
-
-### For Cost
-
-- Use `gpt-4o-mini` for both models
-- Set appropriate iteration limits
-- Pre-filter context before processing
+- `MAX_CONTEXT_SIZE`: 100MB per context
+- `MAX_SESSION_MEMORY`: 500MB per session
+- `MAX_CHUNKS`: 10,000 per decomposition
+- `MAX_CONTEXTS_PER_SESSION`: 50
+- `MAX_VARIABLES_PER_SESSION`: 1,000
+- `MAX_VARIABLE_SIZE`: 10MB
+- `CHARACTER_LIMIT`: 100,000 characters per tool response
+- `MAX_REPL_OUTPUT`: 50,000 characters per REPL execution
 
 ## Security Considerations
 
-### API Key Protection
-
-- Never commit API keys to version control
-- Use environment variables or secrets management
-- Rotate keys periodically
-
 ### Code Execution
 
-The REPL environment executes JavaScript code generated by the LLM:
+The REPL environment executes JavaScript code in a vm2 sandbox:
 - Code runs in a sandboxed environment
 - Network access is restricted
 - File system access is disabled
@@ -195,6 +109,5 @@ The REPL environment executes JavaScript code generated by the LLM:
 
 ### Input Validation
 
-- All inputs are validated via Zod schemas
-- Context size is not limited (RLM handles large inputs)
-- Query length is limited to 10,000 characters
+- Inputs are validated via Zod schemas
+- Regex patterns are validated to prevent ReDoS

@@ -377,6 +377,7 @@ USAGE:
 OPTIONS:
   --stdio          Run with stdio transport (default)
   --http           Run with HTTP transport
+  --serve          Run HTTP server (HTTPS if configured, otherwise HTTP)
   --https          Run with HTTPS transport (requires TLS key/cert)
   --port=PORT      HTTP port (default: ${HTTP_CONFIG.DEFAULT_PORT})
   --debug          Enable debug logging
@@ -385,6 +386,7 @@ OPTIONS:
 EXAMPLES:
   node dist/index.js                    # Start with stdio
   node dist/index.js --http             # Start HTTP server on port ${HTTP_CONFIG.DEFAULT_PORT}
+  node dist/index.js --serve            # Start HTTP/HTTPS automatically
   node dist/index.js --https            # Start HTTPS server on port ${HTTP_CONFIG.DEFAULT_PORT}
   node dist/index.js --http --port=8080 # Start HTTP server on port 8080
   node dist/index.js --debug            # Start with debug logging
@@ -436,7 +438,8 @@ async function main(): Promise<void> {
     logger.setLevel(LogLevel.DEBUG);
   }
 
-  const httpMode = args.includes('--http') || args.includes('--https');
+  const serveMode = args.includes('--serve');
+  const httpMode = args.includes('--http') || args.includes('--https') || serveMode;
   const requireHttps = args.includes('--https');
   const portArg = args.find(a => a.startsWith('--port='));
   const port = portArg ? parseInt(portArg.split('=')[1], 10) : HTTP_CONFIG.DEFAULT_PORT;
