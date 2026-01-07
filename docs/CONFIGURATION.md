@@ -100,6 +100,8 @@ Required environment variables:
 Optional:
 - `RLM_HTTPS_KEY_PASSPHRASE`
 
+If you place dev certs at `certs/localhost.key` and `certs/localhost.crt`, they are auto-detected.
+
 Example:
 
 ```bash
@@ -111,6 +113,8 @@ node dist/index.js --https --port=3443
 ## OAuth2 (HTTP)
 
 When `RLM_OAUTH_ENABLED=true`, the server protects `POST /mcp` and exposes:
+- `/.well-known/oauth-protected-resource` (protected resource metadata)
+- `/.well-known/oauth-protected-resource/mcp` (MCP resource metadata)
 - `/.well-known/oauth-authorization-server`
 - `/oauth/token`
 - `/oauth/jwks` (for RS256)

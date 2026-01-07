@@ -140,6 +140,22 @@ function normalizeScope(requested: string | undefined, allowed: string[]): { sco
   return { scope: requestedScopes.join(' ') };
 }
 
+function buildAuthenticateHeader(oauth: OAuthState, error: string, description: string): string {
+  const parts = [
+    `realm="${SERVER_NAME}"`,
+    `error="${error}"`,
+    `error_description="${description}"`
+  ];
+  const scopeValue = oauth.scopes.join(' ');
+  if (scopeValue) {
+    parts.push(`scope="${scopeValue}"`);
+  }
+  if (oauth.resourceMetadataUrl) {
+    parts.push(`resource_metadata="${oauth.resourceMetadataUrl}"`);
+  }
+  return `Bearer ${parts.join(', ')}`;
+}
+
 function sendOAuthError(
   res: Response,
   oauth: OAuthState,
@@ -147,13 +163,25 @@ function sendOAuthError(
   error: string,
   description: string
 ): void {
-  res.set('WWW-Authenticate', `Bearer realm="${SERVER_NAME}", error="${error}", error_description="${description}"`);
-  res.status(status).json({
+  res.set('WWW-Authenticate', buildAuthenticateHeader(oauth, error, description));
+  const responseBody: Record<string, unknown> = {
     error,
     error_description: description,
-    issuer: oauth.issuer,
-    token_endpoint: oauth.metadata.token_endpoint
-  });
+    issuer: oauth.issuer
+  };
+  const tokenEndpoint = typeof oauth.metadata.token_endpoint === 'string'
+    ? oauth.metadata.token_endpoint
+    : undefined;
+  if (tokenEndpoint) {
+    responseBody.token_endpoint = tokenEndpoint;
+  }
+  if (oauth.resourceMetadataUrl) {
+    responseBody.resource_metadata = oauth.resourceMetadataUrl;
+  }
+  if (oauth.scopes.length > 0) {
+    responseBody.scope = oauth.scopes.join(' ');
+  }
+  res.status(status).json(responseBody);
 }
 
 function createAuthMiddleware(getOAuth: () => OAuthState) {
@@ -271,7 +299,7 @@ function assertHttpsConfig(): void {
 /**
  * Create and configure the MCP server
  */
-function createServer(): McpServer {
+function createMcpServer(): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
     version: SERVER_VERSION
@@ -288,7 +316,7 @@ function createServer(): McpServer {
  * Start server with stdio transport (default)
  */
 async function startStdioServer(): Promise<void> {
-  const server = createServer();
+  const server = createMcpServer();
   const transport = new StdioServerTransport();
   
   await server.connect(transport);
@@ -315,6 +343,8 @@ async function startHttpServer(
     clientId: '',
     clientSecret: '',
     metadata: {},
+    resourceMetadataUrl: undefined,
+    protectedResourceMetadata: undefined,
     issueToken: async () => ({ accessToken: '', expiresIn: 0, scope: '' }),
     verifyToken: async () => ({})
   };
@@ -338,6 +368,18 @@ async function startHttpServer(
   });
   app.use(express.json({ limit: HTTP_CONFIG.MAX_BODY_SIZE }));
   app.use(express.urlencoded({ extended: false }));
+
+  const sendProtectedResourceMetadata = (_req: Request, res: Response) => {
+    const oauth = getOAuth();
+    if (!oauth.enabled || !oauth.protectedResourceMetadata) {
+      res.status(404).json({ error: 'oauth_disabled' });
+      return;
+    }
+    res.json(oauth.protectedResourceMetadata);
+  };
+
+  app.get('/.well-known/oauth-protected-resource', sendProtectedResourceMetadata);
+  app.get('/.well-known/oauth-protected-resource/mcp', sendProtectedResourceMetadata);
 
   app.get('/.well-known/oauth-authorization-server', (_req, res) => {
     const oauth = getOAuth();
@@ -409,7 +451,7 @@ async function startHttpServer(
       return;
     }
 
-    const server = createServer();
+    const server = createMcpServer();
     
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // Stateless mode
@@ -444,12 +486,15 @@ async function startHttpServer(
 
   // Server info endpoint
   app.get('/info', (_, res) => {
+    const oauth = getOAuth();
     res.json({
       name: SERVER_NAME,
       version: SERVER_VERSION,
       description: 'RLM Infrastructure Server - Enables any LLM to process arbitrarily long contexts through recursive decomposition',
       design: 'No external LLM API required - your client LLM performs the reasoning',
-      auth: getOAuth().enabled ? { type: 'oauth2', issuer: getOAuth().issuer } : { type: 'none' },
+      auth: oauth.enabled
+        ? { type: 'oauth2', issuer: oauth.issuer, resource_metadata: oauth.resourceMetadataUrl }
+        : { type: 'none' },
       features: [
         'Token-based chunking (tiktoken)',
         'BM25 chunk ranking',
@@ -548,8 +593,8 @@ async function startHttpServer(
   let attemptPort = port;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const baseUrl = process.env.RLM_OAUTH_ISSUER || `${protocol}://localhost:${attemptPort}`;
-    oauthState = await initializeOAuth({ baseUrl, protocol });
+    const baseUrl = `${protocol}://localhost:${attemptPort}`;
+    oauthState = await initializeOAuth({ baseUrl, protocol, resourcePath: '/mcp' });
 
     if (oauthState.enabled && protocol !== 'https' && !oauthState.allowInsecureHttp) {
       logger.error('OAuth requires HTTPS. Configure TLS or set RLM_OAUTH_ALLOW_INSECURE_HTTP=true for local testing.');

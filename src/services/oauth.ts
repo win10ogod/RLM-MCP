@@ -40,6 +40,8 @@ export interface OAuthState {
   clientSecret: string;
   metadata: Record<string, unknown>;
   jwks?: { keys: JWK[] };
+  resourceMetadataUrl?: string;
+  protectedResourceMetadata?: Record<string, unknown>;
   issueToken: (scope: string) => Promise<{ accessToken: string; expiresIn: number; scope: string }>;
   verifyToken: (token: string) => Promise<JWTPayload>;
 }
@@ -76,15 +78,16 @@ const getOAuthConfig = (): OAuthConfig => {
     ? 'HS256'
     : 'RS256';
 
+  const enabled = parseBoolean(process.env.RLM_OAUTH_ENABLED);
   const clientId = process.env.RLM_OAUTH_CLIENT_ID || DEFAULT_CLIENT_ID;
   const clientSecret = process.env.RLM_OAUTH_CLIENT_SECRET || DEFAULT_CLIENT_SECRET;
 
-  if (clientId === DEFAULT_CLIENT_ID || clientSecret === DEFAULT_CLIENT_SECRET) {
+  if (enabled && (clientId === DEFAULT_CLIENT_ID || clientSecret === DEFAULT_CLIENT_SECRET)) {
     logger.warn('OAuth client credentials are using defaults. Set RLM_OAUTH_CLIENT_ID and RLM_OAUTH_CLIENT_SECRET.');
   }
 
   return {
-    enabled: parseBoolean(process.env.RLM_OAUTH_ENABLED),
+    enabled,
     issuer: process.env.RLM_OAUTH_ISSUER,
     audience: process.env.RLM_OAUTH_AUDIENCE || 'rlm-mcp',
     clientId,
@@ -151,9 +154,14 @@ const resolveJwtKeys = async (config: OAuthConfig): Promise<{
 export const initializeOAuth = async (options: {
   baseUrl: string;
   protocol: 'http' | 'https';
+  resourcePath?: string;
 }): Promise<OAuthState> => {
   const config = getOAuthConfig();
   const issuer = config.issuer || options.baseUrl;
+  const resourcePath = options.resourcePath || '/mcp';
+  const normalizedResourcePath = resourcePath.startsWith('/') ? resourcePath : `/${resourcePath}`;
+  const resourceUrl = new URL(normalizedResourcePath, options.baseUrl).toString();
+  const resourceMetadataUrl = new URL('/.well-known/oauth-protected-resource/mcp', options.baseUrl).toString();
 
   if (!config.enabled) {
     return {
@@ -165,14 +173,16 @@ export const initializeOAuth = async (options: {
       clientId: config.clientId,
       clientSecret: config.clientSecret,
       metadata: {},
+      resourceMetadataUrl: undefined,
+      protectedResourceMetadata: undefined,
       issueToken: async () => ({ accessToken: '', expiresIn: 0, scope: '' }),
       verifyToken: async () => ({})
     };
   }
 
   const keys = await resolveJwtKeys(config);
-  const tokenEndpoint = `${options.baseUrl}/oauth/token`;
-  const jwksUri = keys.jwks ? `${options.baseUrl}/oauth/jwks` : undefined;
+  const tokenEndpoint = new URL('/oauth/token', options.baseUrl).toString();
+  const jwksUri = keys.jwks ? new URL('/oauth/jwks', options.baseUrl).toString() : undefined;
 
   const metadata: Record<string, unknown> = {
     issuer,
@@ -186,6 +196,14 @@ export const initializeOAuth = async (options: {
     metadata.jwks_uri = jwksUri;
   }
 
+  const protectedResourceMetadata: Record<string, unknown> = {
+    resource: resourceUrl,
+    authorization_servers: [issuer],
+    scopes_supported: config.scopes,
+    bearer_methods_supported: ['header'],
+    resource_documentation: new URL('/info', options.baseUrl).toString()
+  };
+
   return {
     enabled: true,
     issuer,
@@ -196,6 +214,8 @@ export const initializeOAuth = async (options: {
     clientSecret: config.clientSecret,
     metadata,
     jwks: keys.jwks,
+    resourceMetadataUrl,
+    protectedResourceMetadata,
     issueToken: async (scope: string) => {
       const jwt = await new SignJWT({ scope })
         .setProtectedHeader({ alg: keys.algorithm, ...(keys.kid ? { kid: keys.kid } : {}) })

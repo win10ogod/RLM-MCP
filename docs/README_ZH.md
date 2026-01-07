@@ -128,6 +128,15 @@ npm run all
 
 設定 `RLM_OAUTH_ENABLED=true` 後，`/mcp` 需要 Bearer token：
 
+伺服器會提供：
+- `/.well-known/oauth-protected-resource`
+- `/.well-known/oauth-protected-resource/mcp`
+- `/.well-known/oauth-authorization-server`
+- `/oauth/token`
+- `/oauth/jwks`（RS256）
+
+MCP 客戶端也可從 `WWW-Authenticate` 標頭取得 `resource_metadata`。
+
 ```bash
 curl -X POST http://localhost:3000/oauth/token \
   -H "Content-Type: application/x-www-form-urlencoded" \

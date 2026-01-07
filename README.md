@@ -414,9 +414,13 @@ Endpoints:
 
 Set `RLM_OAUTH_ENABLED=true` to protect the HTTP `/mcp` endpoint with OAuth2
 client credentials. The server exposes:
+- `/.well-known/oauth-protected-resource` (protected resource metadata)
+- `/.well-known/oauth-protected-resource/mcp` (MCP resource metadata)
 - `/.well-known/oauth-authorization-server`
 - `/oauth/token`
 - `/oauth/jwks` (for RS256)
+
+Clients can discover `resource_metadata` in the `WWW-Authenticate` header or fetch it directly from the well-known endpoints.
 
 Example token request:
 ```bash
